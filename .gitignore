@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# 数据：原始数据为公开数据集，按 README 下载；清洗结果由脚本重新生成
+data/
+
+# 本地工具产物
+.playwright-mcp/
+.streamlit/secrets.toml
+.env
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
