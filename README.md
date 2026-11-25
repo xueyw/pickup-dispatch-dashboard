@@ -1,85 +1,87 @@
-# 小批量揽收：排车 + 日报 + 预警
+# Small-Batch Pickup: Dispatch Planning, Daily Report & Return Alerts
 
-基于菜鸟公开数据集 [LaDe](https://huggingface.co/datasets/Cainiao-AI/LaDe)（吉林揽收数据，26 万条订单）做的模拟项目。场景是面向小批量商户的揽收业务，有以下约束：
+English | [Français](README.fr.md) | [中文](README.zh-CN.md)
 
-- 车辆在前一晚排定，**每车每天只跑一趟**，当天基本不能大改
-- 临时加车要 1 小时以上才能到
-- 所有车辆 **18:00 前必须回仓**卸货
+This is a simulation project built on the public Cainiao [LaDe](https://huggingface.co/datasets/Cainiao-AI/LaDe) dataset (Jilin pickup data, about 262,000 orders). It models a pickup operation serving small-batch merchants under these constraints:
 
-> 车辆容量、包裹体积、车速等字段在原数据中没有，是模拟出来的，具体假设写在各脚本开头的注释里。
+- Vehicles are planned the night before. **Each vehicle makes a single trip per day**, and the plan can't change much during the day.
+- An ad-hoc extra vehicle takes more than 1 hour to arrive.
+- **Every vehicle must be back at the depot by 18:00** to unload.
 
-## 模块
+> Vehicle capacity, parcel volume and travel speed are not in the original data. They are simulated, and each script's header documents the assumptions.
 
-| 模块 | 文件 | 内容 |
+## Modules
+
+| Module | File | What it does |
 |---|---|---|
-| 数据清洗 | `src/clean.py` | 三级标记：脏数据 `dq_*`（剔除）/ 可疑 `sus_*`（保留）/ 业务异常 `biz_*`（用于分析）；用 pandera 做 schema 校验 |
-| 数据仓库 | `sql/`、`src/load_db.py` | PostgreSQL 分 raw → stg → mart 三层，SQL 和 Python 的清洗结果逐条规则交叉核对 |
-| 排车求解 | `src/capacity_sensitivity.py` | OR-Tools CVRPTW（容量 + 时间窗 + 18:00 回仓） |
-| 地图看板 | `app.py` | Streamlit + folium，按车辆画路线，标出回仓余量不足 60 分钟的车 |
-| 缓冲仿真 | `src/buffer_sim.py` | 前一晚按预测排车，再用当天实际订单执行，对比"机动车 × 上午时间窗放宽"的效果 |
-| 商户分层 | `src/segment.py` | 按频率层和时间窗层划分 AOI，模拟"和头部商户协商放宽上午时间窗"能省多少车 |
-| 需求预测 | `src/forecast.py` | 分位数 GBM 预测 P50/P80，含节假日特征，并识别数据停摆的异常日 |
-| 回仓预警 | `src/alert.py` | 回放 13:00–17:00 各检查点，评估预警规则的命中率，以及能否在 16:00 前报出来（留出加车时间） |
-| BI 报表 | Power BI | 直连 PostgreSQL 的 mart 层 |
+| Data cleaning | `src/clean.py` | Three-level flags: dirty `dq_*` (excluded), suspicious `sus_*` (kept), business anomaly `biz_*` (analysed). Schema validation with pandera. |
+| Data warehouse | `sql/`, `src/load_db.py` | PostgreSQL raw → stg → mart layers. SQL and Python cleaning results are cross-checked rule by rule. |
+| Route optimisation | `src/capacity_sensitivity.py` | OR-Tools CVRPTW: vehicle capacity, time windows and the 18:00 return deadline. |
+| Map dashboard | `app.py` | Streamlit + folium. Draws each vehicle's route and highlights vehicles with less than 60 min of return slack. |
+| Buffer simulation | `src/buffer_sim.py` | Plans the night before from the forecast, then executes on the day's actual orders. Compares spare vehicles against relaxing morning time windows. |
+| Merchant segmentation | `src/segment.py` | Segments AOIs by visit frequency and time-window profile. Estimates how many vehicles are saved by negotiating later morning windows with the top merchants. |
+| Demand forecast | `src/forecast.py` | Quantile GBM (P50/P80) with holiday features. Detects days where the data collapses. |
+| Return alerts | `src/alert.py` | Replays checkpoints from 13:00 to 17:00. Scores alert rules on precision and on whether they fire by 16:00, which still leaves time to add a vehicle. |
+| BI report | Power BI | Connects directly to the PostgreSQL mart layer. |
 
-## 技术栈
+## Tech Stack
 
-| 用途 | 库 / 工具 |
+| Purpose | Libraries / tools |
 |---|---|
-| 数据处理 | pandas、NumPy、PyArrow（Parquet 存储） |
-| 数据质量校验 | pandera（schema 与取值范围校验） |
-| 数据库 | PostgreSQL 16、psycopg（COPY 批量导入）、SQLAlchemy |
-| 路径优化 | Google OR-Tools（带容量和时间窗的车辆路径问题 CVRPTW） |
-| 需求预测 | scikit-learn（HistGradientBoostingRegressor 分位数回归） |
-| 可视化 | Streamlit、folium + streamlit-folium（地图）、Plotly、Power BI |
-| 其他 | tabulate（生成 Markdown 报告）、concurrent.futures（多进程并行仿真） |
+| Data processing | pandas, NumPy, PyArrow (Parquet storage) |
+| Data validation | pandera (schema and value-range checks) |
+| Database | PostgreSQL 16, psycopg (bulk COPY load), SQLAlchemy |
+| Route optimisation | Google OR-Tools (capacitated VRP with time windows) |
+| Forecasting | scikit-learn (HistGradientBoostingRegressor, quantile loss) |
+| Visualisation | Streamlit, folium + streamlit-folium (maps), Plotly, Power BI |
+| Other | tabulate (Markdown reports), concurrent.futures (parallel simulation) |
 
-## 数据流程
+## Pipeline
 
 ```
-原始 CSV（26 万行）
-  │  clean.py：字段解析 → 去重 → 15 条清洗规则打标记 → pandera 校验
+Raw CSV (262k rows)
+  │  clean.py: parse fields → deduplicate → flag with 15 rules → pandera validation
   ▼
-清洗后数据（Parquet，全部行都保留，用 is_clean 区分）
-  ├─ capacity_sensitivity.py  不同车辆容量下最少需要几辆车
-  ├─ buffer_sim.py            前一晚计划 vs 当天实际执行（多进程，8 天 × 2 片区 × 6 种方案）
-  ├─ segment.py               商户分层 + 协商放宽时间窗的实验
-  ├─ forecast.py              片区-日面板 → 异常日识别 → 特征 → P50/P80 预测
-  └─ alert.py                 按检查点回放当天进度 → 预警规则评估
+Cleaned data (Parquet, all rows kept, split by is_clean)
+  ├─ capacity_sensitivity.py  minimum fleet size for each vehicle capacity
+  ├─ buffer_sim.py            night-before plan vs. same-day execution (multiprocess, 8 days × 2 regions × 6 scenarios)
+  ├─ segment.py               merchant segmentation + time-window negotiation experiment
+  ├─ forecast.py              region-day panel → anomaly detection → features → P50/P80 forecast
+  └─ alert.py                 checkpoint replay → alert rule evaluation
   ▼
-load_db.py：raw（原样导入）→ stg（SQL 清洗）→ mart（日报、揽收员-日、DQ 汇总）
+load_db.py: raw (as-is) → stg (SQL cleaning) → mart (daily report, courier-day, DQ summary)
   ▼
-Power BI 日报 / Streamlit 地图看板
+Power BI daily report / Streamlit map dashboard
 ```
 
-## 解决的问题
+## Problems Solved
 
-**数据清洗**
-- **时间字段没有年份**：原始数据格式是 `MM-DD HH:MM:SS`，结合 `ds` 字段补上年份后解析，并检查揽收时间和日期是否一致。
-- **"距离过远"规则误杀了 9% 的数据**：最初按到市中心超过 100km 判定，结果把一整个外县片区都判成了脏数据。改成"到本片区中位点超过 30km"之后，只命中 2 条真正异常的记录。
-- **规则分三级处理**：GPS 缺失（16%）、漂移这类问题不能直接删，否则会丢掉大量有效订单。所以分成脏数据（剔除）、可疑（保留并标记）、业务异常（拿来做分析），每条规则都有命中数和占比报告。
-- **SQL 和 Python 两套清洗结果交叉核对**：13 条规则的命中数逐条比对，结果全部一致，保证数据库里的数据和分析结果是同一口径。
-- **识别数据本身的问题**：5 月上旬是采集爬坡期；6/20–6/25 市区 11 个片区同时接近 0 单，但外县正常，说明是数据缺失而不是业务真的停了。按"低于近 28 天中位数的 30%"自动标记为异常日，不参与训练和评估。
+**Data cleaning**
+- **Timestamps without a year.** The raw format is `MM-DD HH:MM:SS`. I added the year from the `ds` field and checked that each pickup time matches its date.
+- **A distance rule that wrongly flagged 9% of rows.** The first rule (more than 100 km from the city centre) flagged a whole rural county as dirty data. I changed it to "more than 30 km from the order's own region median", which now catches only 2 genuinely bad records.
+- **Three-level handling.** Missing GPS (16%) and GPS drift can't simply be deleted without losing many valid orders. Rules are split into dirty (excluded), suspicious (kept and flagged) and business anomaly (analysed), and each rule reports its hit count and share.
+- **SQL and Python results cross-checked.** The SQL and Python pipelines' hit counts are compared for all 13 rules. They all match, so the database and the analysis use the same definitions.
+- **Data-collection problems detected.** Early May is the dataset's ramp-up period. From 20 to 25 June, 11 urban regions dropped to almost zero while the county stayed normal, which points to missing data rather than a real stop in business. Any region-day below 30% of its trailing 28-day median is flagged automatically and left out of training and evaluation.
 
-**建模与分析**
-- **跨天的时间窗导致点位被丢**：有些订单的时间窗在第二天，被截断到 18:00 后变成了无解。识别出这类订单后，把它们设为当天任意时间可揽。
-- **找到决定用车数的真正因素**：一开始以为是时间缓冲不够，但车只装一半就回仓了。进一步分析发现，73% 的计划点要求在 9–11 点揽收，是上午的时间窗决定了要派几辆车，于是把仿真方案改成"机动车 × 上午时间窗放宽"。
-- **商户分层第一版几乎全是"混合"**：因为一个 AOI 里有多个商户，订单比例很难分开。改成按"有上午必到订单的天数占比"来分层，结果就清楚了。
-- **高峰预警太多**：用 P80 判断高峰时，875 次里有 574 次报警，几乎天天报。改用 P50 判断后降到 199 次，命中率 33%，召回率 40%。
-- **预警评估口径**：原来"17:00 预警"也算作及时，但这时已经来不及加车了。改成只有 16:00 前报出的才算及时，并单独评估"早预警"模式。
-- **前一晚计划的稳定性**：当天重新规划路线时，给改派到其他车的点位加惩罚，保证"计划好之后不大改"这个约束成立。
+**Modelling and analysis**
+- **Stops dropped because of cross-day time windows.** Some orders have time windows that fall on the next day. Clipping them at 18:00 made them impossible to schedule, so these orders are now treated as flexible (any time that day).
+- **Finding what really drives fleet size.** My first guess was a lack of time buffer, but vehicles were returning only half full. Further analysis showed that 73% of planned stops must be picked up between 09:00 and 11:00: the morning windows decide how many vehicles are needed. I redesigned the simulation as "spare vehicles × morning-window relaxation".
+- **A first segmentation with almost every merchant labelled "mixed".** One AOI holds several merchants, so order-share rules don't separate them. Segmenting instead by "share of days with a must-be-morning order" gave clear groups.
+- **Too many peak alerts.** Flagging on P80 raised 574 alerts out of 875 region-days, almost every day. Flagging on P50 cut this to 199, with 33% precision and 40% recall.
+- **Alert timeliness redefined.** A 17:00 alert used to count as "in time", even though by then it is too late to add a vehicle. Only alerts raised by 16:00 now count, and an "early alert" mode is evaluated separately.
+- **Stable plans.** When routes are re-optimised during the day, moving a stop to another vehicle is penalised, which keeps the "plan can't change much" constraint.
 
-## 主要结论
+## Key Findings
 
-- **前一晚的计划是主要手段**：市区大片区按计划用 6.75 辆车，有 38% 的天完不成；加 1 辆机动车后完不成的天数降到 0。
-- **上午 9–11 点的时间窗决定了要派几辆车**：和上午件量前 20 的商户协商把时间窗放宽 1 小时，可以省 1 辆左右（市区少 1.13 辆，外县少 1 辆）。
-- **预测**：WAPE 和 28 天中位数基线差不多（12.8% 对 12.6%），提升主要在高峰日：高峰日低估从 20.3% 降到 13.0%，P80 覆盖率 80.5%。
-- **当天预警是兜底手段**：最简单的规则"16:00 还有 ≥2 个点没揽"，能在来得及加车时报出 67% 的超时，比基于 ETA 的规则效果更好。
-- **数据问题**：5/1–5/15 是采集爬坡期，6/20–6/25 市区片区停摆，这两段都要先识别出来剔除，否则预测和基线都会失真。
+- **The night-before plan is the main lever.** In the large urban region, planning 6.75 vehicles leaves the work unfinished on 38% of days. Adding one spare vehicle brings that to 0%.
+- **Morning windows (09:00–11:00) set the fleet size.** Negotiating a 1-hour later window with the top 20 merchants by morning volume saves about one vehicle (1.13 in the urban region, 1 in the county).
+- **Forecast.** Overall WAPE is on par with the 28-day-median baseline (12.8% vs. 12.6%). The gain is on peak days: underestimation drops from 20.3% to 13.0%, and P80 coverage is 80.5%.
+- **Same-day alerts are a safety net.** The simplest rule, "2 or more stops still pending at 16:00", catches 67% of late returns while there is still time to add a vehicle. It beats the ETA-based rules.
+- **Data issues must be handled first.** The early-May ramp-up and the late-June urban outage both have to be detected and removed, or both the forecast and the baseline are distorted.
 
-详细结果见 `reports/`。
+Detailed results are in `reports/` (in Chinese).
 
-## 运行
+## Getting Started
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -92,12 +94,12 @@ mkdir -p data/raw && curl -L -o data/raw/pickup_jl.csv \
 .venv/bin/python src/segment.py
 .venv/bin/python src/forecast.py
 .venv/bin/python src/alert.py
-.venv/bin/python src/load_db.py      # 需要本地 PostgreSQL 和数据库 lade
+.venv/bin/python src/load_db.py      # requires local PostgreSQL with a database named lade
 .venv/bin/streamlit run app.py
 ```
 
-## 局限
+## Limitations
 
-- LaDe 的揽收员同时也做派送，所以原始数据里迟到的基础比例偏高
-- 仿真假设当天所有订单在早上就已知
-- 每个片区只测试了 8 天
+- LaDe couriers also handle deliveries, so the raw data has a high baseline late rate.
+- The simulation assumes all of the day's orders are known in the morning.
+- Each region is tested on only 8 days.
